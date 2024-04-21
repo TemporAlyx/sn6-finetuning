@@ -211,7 +211,7 @@ class CortexSubsetLoader(IterableDataset):
                  max_samples=1000, steps: typing.Optional[int]=1, progress=False, retry_delay=60,
                  retry_limit=10, page_size=100, running: typing.Optional[bool]=False,
                  cortex_project="cortex-t/multi-modality",
-                 cortex_type="validator", silent=False, ignore_list=[]):
+                 cortex_type="validator", silent=False, ignore_list=[], dedup=True):
         api = wandb.Api(timeout=100)
 
         if random_seed is None:
@@ -266,7 +266,8 @@ class CortexSubsetLoader(IterableDataset):
                                             if not any(x in response for x in UNWANTED_PHRASES):
                                                 if response not in ignore_list:
                                                     self.buffer.append((prompt, response))
-                                                    ignore_list.append(response)
+                                                    if dedup:
+                                                        ignore_list.append(response)
                                                     if len(self.buffer) == max_samples:
                                                         return
                                 except KeyError:
