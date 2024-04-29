@@ -35,7 +35,7 @@ def compute_losses(model, batches, device):
             losses.append(loss)
             steps += 1
             if steps % (len(batches) // 8) == 0:
-                print(".", end="")
+                print(".", end="") # rudimentary progress bar
     return losses
 
 params = {
@@ -57,6 +57,16 @@ def validate_improvement(old_model_name, new_model_name, samples=768, tokenizer_
         print("against", new_model_name)
     else:
         print("against", new_model_name.config.name_or_path)
+
+    # tokenizer abbreviations
+    if tokenizer_name == "l3" or tokenizer_name == "llama3":
+        tokenizer_name = "NousResearch/Meta-Llama-3-8B-Instruct"
+    elif tokenizer_name == "mistral" or tokenizer_name == "m1":
+        tokenizer_name = "mistralai/Mistral-7B-Instruct-v0.1"
+    elif tokenizer_name == "stablelm" or tokenizer_name == "s1":
+        tokenizer_name = "stabilityai/stablelm-2-zephyr-1_6b"
+    elif tokenizer_name == "gemma" or tokenizer_name == "g1":
+        tokenizer_name = "google/gemma-2b-it"
 
     # load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, cache_dir=cache_dir)

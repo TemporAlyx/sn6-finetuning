@@ -9,6 +9,7 @@ import torch
 from transformers import LlamaForCausalLM
 from transformers import AutoTokenizer
 
+
 def norm_model_weights(model, model_type='llama'):
     last_q = None
     lqb = None
@@ -113,6 +114,47 @@ def norm_model_weights(model, model_type='llama'):
         #     param.data *= 200
         
     return model
+
+
+def merge(model0, model1, ratio=0.5, embed_ratio=None, norm_ratio=None, fc_ratio=None): # higher ratio means more of model0
+    if embed_ratio is None: embed_ratio = ratio
+    if norm_ratio is None: norm_ratio = ratio
+    if fc_ratio is None: fc_ratio = ratio
+
+    params0 = {}
+    for name, param in model0.named_parameters():
+        params0[name] = param
+
+    for name, param in model1.named_parameters():
+        if "embed" in name:
+            param.data = ((params0[name].data * embed_ratio) + (param.data * (1 - embed_ratio)))
+        elif ("up_proj" not in name 
+            and "down_proj" not in name 
+            and "gate_proj" not in name 
+            and "o_proj" not in name 
+            and "k_proj" not in name 
+            and "v_proj" not in name 
+            and "q_proj" not in name
+            and "embed" not in name
+            ):
+            param.data = ((params0[name].data * norm_ratio) + (param.data * (1 - norm_ratio)))
+        elif "up_proj" in name or "down_proj" in name:
+            param.data = ((params0[name].data * fc_ratio) + (param.data * (1 - fc_ratio)))
+        else:
+            param.data = ((params0[name].data * ratio) + (param.data * (1 - ratio)))
+
+    return model1
+
+def copy_weights_over(model0, model1):
+    """Copies the weights from model0 to model1, returns model1 with the copied weights"""
+    params0 = {}
+    for name, param in model0.named_parameters():
+        params0[name] = param
+
+    for name, param in model1.named_parameters():
+        if name in params0:
+            param.data = params0[name].data
+    return model1
 
 
 # https://github.com/NousResearch/finetuning-subnet/blob/master/model/storage/disk/utils.py

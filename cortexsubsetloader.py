@@ -319,22 +319,3 @@ class CortexSubsetLoader(IterableDataset):
     def __iter__(self):
         return self.buffer.__iter__()
     
-def tokenize(tokenizer, ext_data, max_length=2048):
-    batches = []
-    if type(ext_data[0]) is dict:
-        ext_data = [tuple(x.values()) for x in ext_data]
-    data = ext_data
-    for prompt, response in data:
-        conversation = [
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": response}
-        ]
-        prompt_ids = tokenizer.apply_chat_template(
-            [conversation[0]], truncation=True, max_length=max_length,
-            add_generation_prompt=True
-        )
-        ids = tokenizer.apply_chat_template(
-            conversation, truncation=True, max_length=max_length,
-        )
-        batches.append((torch.stack([torch.tensor(ids)]), len(prompt_ids)))
-    return batches
