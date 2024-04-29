@@ -38,16 +38,10 @@ def compute_losses(model, batches, device):
                 print(".", end="") # rudimentary progress bar
     return losses
 
-params = {
-    'low_cpu_mem_usage': True,
-    'trust_remote_code': False,
-    'torch_dtype': torch.bfloat16,
-    'use_safetensors': True,
-    'attn_implementation': "flash_attention_2"
-}
+params = load_local_config()
 
 def validate_improvement(old_model_name, new_model_name, samples=768, tokenizer_name="NousResearch/Meta-Llama-3-8B-Instruct", 
-                         device="cuda", cache_dir=None, dedup=False):
+                         device="cuda", dedup=False):
     # allow for passing models in directly, or by name and loading them here
     if type(old_model_name) == str:
         print("Testing", old_model_name, end=" ")
@@ -58,18 +52,8 @@ def validate_improvement(old_model_name, new_model_name, samples=768, tokenizer_
     else:
         print("against", new_model_name.config.name_or_path)
 
-    # tokenizer abbreviations
-    if tokenizer_name == "l3" or tokenizer_name == "llama3":
-        tokenizer_name = "NousResearch/Meta-Llama-3-8B-Instruct"
-    elif tokenizer_name == "mistral" or tokenizer_name == "m1":
-        tokenizer_name = "mistralai/Mistral-7B-Instruct-v0.1"
-    elif tokenizer_name == "stablelm" or tokenizer_name == "s1":
-        tokenizer_name = "stabilityai/stablelm-2-zephyr-1_6b"
-    elif tokenizer_name == "gemma" or tokenizer_name == "g1":
-        tokenizer_name = "google/gemma-2b-it"
-
     # load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, cache_dir=cache_dir)
+    tokenizer = get_tokenizer(tokenizer_name)
 
     # get new data for each run
     cortex_data = CortexSubsetLoader(
@@ -81,7 +65,7 @@ def validate_improvement(old_model_name, new_model_name, samples=768, tokenizer_
 
     # load old model
     if type(old_model_name) is str:
-        old_model = AutoModelForCausalLM.from_pretrained(old_model_name, **params, cache_dir=cache_dir)
+        old_model = AutoModelForCausalLM.from_pretrained(old_model_name, **params)
     else:
         old_model = old_model_name
     
@@ -93,7 +77,7 @@ def validate_improvement(old_model_name, new_model_name, samples=768, tokenizer_
 
     # load new model
     if type(new_model_name) is str:
-        new_model = AutoModelForCausalLM.from_pretrained(new_model_name, **params, cache_dir=cache_dir)
+        new_model = AutoModelForCausalLM.from_pretrained(new_model_name, **params)
     else:
         new_model = new_model_name
 
@@ -121,7 +105,7 @@ def validate_improvement(old_model_name, new_model_name, samples=768, tokenizer_
 
 
 def print_model_params(model, norm=False, cache_dir=None):
-    model = AutoModelForCausalLM.from_pretrained(model, **params, cache_dir=cache_dir)
+    model = AutoModelForCausalLM.from_pretrained(model, **params)
     if norm:
         model = norm_model_weights(model)
     for name, param in model.named_parameters():
@@ -130,8 +114,8 @@ def print_model_params(model, norm=False, cache_dir=None):
 
 
 def check_matching_weights(model0, model1, cache_dir=None):
-    model0 = AutoModelForCausalLM.from_pretrained(model0, **params, cache_dir=cache_dir)
-    model1 = AutoModelForCausalLM.from_pretrained(model1, **params, cache_dir=cache_dir)
+    model0 = AutoModelForCausalLM.from_pretrained(model0, **params)
+    model1 = AutoModelForCausalLM.from_pretrained(model1, **params)
     mismatch_diffs = []
     any_mismatch = False
     for (name0, param0), (name1, param1) in zip(model0.named_parameters(), model1.named_parameters()):
