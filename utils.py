@@ -22,7 +22,7 @@ def get_tokenizer(tokenizer_name):
     return AutoTokenizer.from_pretrained(tokenizer_name)
 
 def norm_model_weights(model):
-    # NOTE: does not work with all models, different sizes and configurations may cause issues, not all models have a full solve
+    # NOTE: does not work with all models, different sizes and configurations may cause issues, not all weight pairs have a full solve
     bias = False
     for name, param in model.named_parameters():
         if "q_proj" in name:
@@ -120,25 +120,29 @@ def copy_weights_over(model0, model1):
             param.data = params0[name].data
     return model1
 
-def load_local_config(config_path='Models/model_loading_config.json'):
-    if not os.path.exists('Models'):
+def load_local_config(config_path='model_loading_config.json', cache_dir='Models'):
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    if not os.path.isfile(os.path.join(cache_dir, config_path)):
         new_config = {
                 'low_cpu_mem_usage': True,
                 'trust_remote_code': False,
-                'torch_dtype': torch.bfloat16,
+                'torch_dtype': "bfloat16",
                 'use_safetensors': True,
                 'attn_implementation': "flash_attention_2",
-                'cache_dir': "Models"
+                'cache_dir': cache_dir
             }
         save_local_config(new_config, config_path)
-    with open(config_path, 'r') as f:
+    with open(os.path.join(cache_dir, config_path), 'r') as f:
         config = json.load(f)
+        config['torch_dtype'] = torch.bfloat16 if config['torch_dtype'] == "bfloat16" else torch.float32
     return config
 
-def save_local_config(config, config_path='Models/model_loading_config.json'):
-    if not os.path.exists('Models'):
-        os.makedirs('Models')
-    with open(config_path, 'w') as f:
+def save_local_config(config, config_name='model_loading_config.json'):
+    cache_dir = config['cache_dir']
+    if not os.path.exists(cache_dir):
+        os.makedirs(cache_dir)
+    with open(os.path.join(cache_dir, config_name), 'w') as f:
         json.dump(config, f)
 
 

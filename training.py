@@ -116,7 +116,7 @@ def evaluate(model, eval_d, base_model, cached_base_loss=None, return_to_cpu=Fal
     gc.collect(); torch.cuda.empty_cache()
 
     if print_stats:
-        print(f" Loss: {eval_loss:.8f}, Base Loss: {eval_base_loss:.6f}, Diff: {diff:.8f},",
+        print(f" RLoss: {eval_loss:.8f}, Base Loss: {eval_base_loss:.6f}, Diff: {diff:.8f},",
             f"WR: {head_to_head:.2f}%, 0epsWR: {eps0_head_to_head:.2f}%, OShL: {overshoot:.8f}")
     if return_stats:
         data = {
@@ -130,12 +130,6 @@ def evaluate(model, eval_d, base_model, cached_base_loss=None, return_to_cpu=Fal
         return data
     
 old_train_data = [] # might be worth writing some code to save and load previously seen data instead
-def get_new_data(tokenizer, n_samples=2560, dedup=True, steps=1, old_data=old_train_data):
-    cortex_subset_loader = CortexSubsetLoader(latest=True, random_seed = None, max_samples=n_samples, progress=False, 
-                                    running=True, retry_limit=5, page_size=400, retry_delay=5, silent=True, steps=steps,
-                                    ignore_list=old_data, dedup=dedup)
-    batches = data_collator(cortex_subset_loader.tokenize(tokenizer))
-    return [batches[i] for i in np.random.permutation(len(batches))]
 
 def clear_old_data_cache():
     global old_train_data
@@ -166,13 +160,21 @@ class Trainer:
     def reset_optimizer(self):
         self.optimizer = None
 
+    def get_new_data(self, n_samples=2560, dedup=True, steps=1, old_data=old_train_data):
+        cortex_subset_loader = CortexSubsetLoader(latest=True, random_seed = None, max_samples=n_samples, progress=False, 
+                                        running=True, retry_limit=5, page_size=400, retry_delay=5, silent=True, steps=steps,
+                                        ignore_list=old_data, dedup=dedup)
+        batches = data_collator(cortex_subset_loader.tokenize(self.tokenizer))
+        return [batches[i] for i in np.random.permutation(len(batches))]
+
+
     def train(self, acc_batch_size=512, opt="adamw", lr=1e-5, lr_schedule="constant", weight_decay=0.0, betas=(0.9, 0.99), 
-                warmup_steps=0, warmup_end_offset=0,
+                warmup_steps=0, warmup_cycle_offset=-1,
                 grad_clip_norm=1.0, ignore_overshot_samples=True, bad_sample_mult=1.0, ignore_sample_loss_below=0.0, precalc_batch_mult=2.25,
                 remerging=False, remerge_ratio=0.75,
                 base_relative_loss=False, loss_eps = 0.02, overshoot_buffer = -0.01, eval_eps=0.01,
-                eval_steps=512, revert=True, eval_revert_if={"loss": 0.004, "head_to_head": -12.5, "eps0_head_to_head": -22.5},
-                save_name="test", do_save=True, cortex_steps=5, max_steps=None,
+                eval_n_batches=1, eval_size=512, revert=True, eval_revert_if={"loss": 0.004, "head_to_head": -12.5, "eps0_head_to_head": -22.5},
+                save_name="test", do_save=True, cortex_steps=5, max_batch_steps=None,
                 gradient_checkpointing=False, excessive_cache_clearing=False, device="cuda"):
         
         if self.base_model is None:
@@ -187,15 +189,15 @@ class Trainer:
 
         if len(self.eval_data) == 0:
             # print("Acquiring initial eval data..", end=" ")
-            eval_d = get_new_data(5120) # get more than necessary to get a wider range of samples
-            eval_d = eval_d[:eval_steps]
+            eval_d = self.get_new_data(n_samples=eval_size*5) # get more than necessary to get a wider range of samples
+            eval_d = eval_d[:eval_size]
             # print("done")
 
         add_inf_steps = 0
         if len(self.train_data) == 0:
             # print("Acquiring initial training data..", end=" ")
             while len(self.train_data) < (acc_batch_size * precalc_batch_mult):
-                new_data = get_new_data(int(acc_batch_size * precalc_batch_mult), steps=cortex_steps+add_inf_steps)
+                new_data = self.get_new_data(n_samples=int(acc_batch_size * precalc_batch_mult), steps=cortex_steps+add_inf_steps)
                 if len(new_data) == 0:
                     add_inf_steps += cortex_steps
                 else:
@@ -231,10 +233,9 @@ class Trainer:
                 raise ValueError(f"Unknown optimizer {opt}")
 
         if lr_schedule == "cosine":
-            lr_scheduler = transformers.get_cosine_schedule_with_warmup(self.optimizer, warmup_steps, (len(self.train_data)//acc_batch_size)+warmup_end_offset)
-        elif lr_schedule == "polynomial":
-            lr_scheduler = transformers.get_polynomial_decay_schedule_with_warmup(self.optimizer, warmup_steps, 
-                                                                                (len(self.train_data)//acc_batch_size)+warmup_end_offset)
+            lr_scheduler = transformers.get_cosine_schedule_with_warmup(self.optimizer, warmup_steps, 
+                                                    num_training_steps=max_batch_steps if max_batch_steps is not None else eval_n_batches+warmup_cycle_offset,
+                                                    last_epoch=max_batch_steps if max_batch_steps is not None else -1)
         elif lr_schedule == "constant":
             lr_scheduler = transformers.get_constant_schedule_with_warmup(self.optimizer, warmup_steps)
         else:
@@ -248,8 +249,8 @@ class Trainer:
             loss = partial_loss / base_loss
             return torch.nn.functional.relu(loss), torch.nn.functional.relu(-(loss + overshoot_buffer)).item()
 
-        if self.precomputed_eval_base_loss is not None and self.base_model is not None:
-            print("Note: precalced eval base loss does not account for pretrained fine-tuning")
+        if self.precomputed_eval_base_loss is None and self.base_model is not None:
+            print("Precalculating and caching base_model eval loss")
             self.precomputed_eval_base_loss = []
             steps_so_far = 1
             
@@ -272,22 +273,21 @@ class Trainer:
             self.model = self.model.to(device)
             print(f"Eval Base Loss: {sum(self.precomputed_eval_base_loss)/len(eval_d):.6f}")
 
-
-        last_eval = 0
+        steps_so_far = 1
+        trained_steps = 0; batches_trained = 0
         epoch_loss = 0; epoch_overshoot = 0; epoch_base_loss = 0; diff = 0
         epoch_wr = 0; epoch_0eps_wr = 0
         fit_samples = 0; unfit_samples = 0
-        trained_steps = 0
         precalc_base_outputs = []
         prev_eval = {"loss": 99.99, "head_to_head": 0.0, "eps0_head_to_head": 0.0}
-        while len(self.train_data) > 0 and (max_steps is None or trained_steps < max_steps):
+        while len(self.train_data) > 0 and (max_batch_steps is None or batches_trained <= max_batch_steps):
 
             if (trained_steps % (acc_batch_size // 8) == 0):
                 print(".", end="")
                 gc.collect(); torch.cuda.empty_cache()
 
             while len(self.train_data) < (acc_batch_size * precalc_batch_mult):
-                new_data = get_new_data(int(acc_batch_size * precalc_batch_mult), steps=cortex_steps+add_inf_steps)
+                new_data = self.get_new_data(n_samples=int(acc_batch_size * precalc_batch_mult), steps=cortex_steps+add_inf_steps)
                 if len(new_data) == 0:
                     add_inf_steps += cortex_steps
                 else:
@@ -358,13 +358,13 @@ class Trainer:
             epoch_0eps_wr += 50.0 if outputs_loss_item == base_loss_item else 0.0
             epoch_overshoot += overshoot_penalty
 
-            if (trained_steps % acc_batch_size) == acc_batch_size:
+            if trained_steps == acc_batch_size:
                 if grad_clip_norm is not None:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip_norm)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-                stat_steps = accum_steps + fit_samples
+                stat_steps = trained_steps + fit_samples
                 print(f"Step {steps_so_far}/{len(self.train_data)}\tLoss: {epoch_loss/stat_steps:.6f}",
                                                         f"OShL: {epoch_overshoot/stat_steps:.3e}"
                                                         f"\tBase: {epoch_base_loss/stat_steps:.4f}",
@@ -375,7 +375,9 @@ class Trainer:
                                                         f"fit: {fit_samples}/{unfit_samples}"
                                                         )
                 epoch_overshoot = 0; epoch_loss = 0; epoch_base_loss = 0; diff = 0; epoch_wr = 0
-                epoch_0eps_wr = 0; unfit_samples = 0; fit_samples = 0; accum_steps = 0
+                epoch_0eps_wr = 0; unfit_samples = 0; fit_samples = 0; trained_steps = 0
+
+                batches_trained += 1
                 
                 lr_scheduler.step()
                 if lr_scheduler.get_last_lr()[0] == 0.0:
@@ -383,45 +385,43 @@ class Trainer:
 
                 gc.collect(); torch.cuda.empty_cache()
 
+                if batches_trained % eval_n_batches == eval_n_batches-1:
+                    is_better = False
+                    if remerging:
+                        self.model = self.model.to("cpu")
+                        self.model = merge(model_prev, self.model, ratio=(1.0 - remerge_ratio))
+                        self.model = self.model.to(device)
+                        new_eval = evaluate(self.model, eval_d, base_model=self.base_model, device=device, 
+                                loss_eps=eval_eps, cached_base_loss=self.precomputed_eval_base_loss, return_stats=True)
+                        
+                        if ((prev_eval['loss'] + eval_revert_if['loss']) > new_eval['loss'] and
+                            (prev_eval['head_to_head'] + eval_revert_if['head_to_head']) < new_eval['head_to_head'] and
+                            (prev_eval['eps0_head_to_head'] + eval_revert_if['eps0_head_to_head']) < new_eval['eps0_head_to_head']):
+                            is_better = True
+                    else:
+                        new_eval = evaluate(self.model, eval_d, base_model=self.base_model, device=device, 
+                                loss_eps=eval_eps, cached_base_loss=self.precomputed_eval_base_loss, return_stats=True)
+                        if ((prev_eval['loss'] + eval_revert_if['loss']) > new_eval['loss'] and
+                            (prev_eval['head_to_head'] + eval_revert_if['head_to_head']) < new_eval['head_to_head'] and
+                            (prev_eval['eps0_head_to_head'] + eval_revert_if['eps0_head_to_head']) < new_eval['eps0_head_to_head']):
+                            is_better = True
 
-            if trained_steps % eval_steps == 0 and len(self.train_data) > 0 and trained_steps != last_eval and self.base_model is not None:
-                is_better = False
-                if remerging:
-                    self.model = self.model.to("cpu")
-                    self.model = merge(model_prev, self.model, ratio=(1.0 - remerge_ratio))
-                    self.model = self.model.to(device)
-                    new_eval = evaluate(self.model, eval_d, base_model=self.base_model, device=device, 
-                            loss_eps=eval_eps, cached_base_loss=self.precomputed_eval_base_loss, return_stats=True)
-                    
-                    if ((prev_eval['loss'] + eval_revert_if['loss']) > new_eval['loss'] and
-                        (prev_eval['head_to_head'] + eval_revert_if['head_to_head']) < new_eval['head_to_head'] and
-                        (prev_eval['eps0_head_to_head'] + eval_revert_if['eps0_head_to_head']) < new_eval['eps0_head_to_head']):
-                        is_better = True
-                else:
-                    new_eval = evaluate(self.model, eval_d, base_model=self.base_model, device=device, 
-                            loss_eps=eval_eps, cached_base_loss=self.precomputed_eval_base_loss, return_stats=True)
-                    if ((prev_eval['loss'] + eval_revert_if['loss']) > new_eval['loss'] and
-                        (prev_eval['head_to_head'] + eval_revert_if['head_to_head']) < new_eval['head_to_head'] and
-                        (prev_eval['eps0_head_to_head'] + eval_revert_if['eps0_head_to_head']) < new_eval['eps0_head_to_head']):
-                        is_better = True
 
-                if revert:
-                    if is_better:
+                    if is_better and (remerging or revert):
                         self.model.save_pretrained("model_prev")
                         model_prev = AutoModelForCausalLM.from_pretrained("model_prev", **params)
                         prev_eval = new_eval
-                    else:
+                    elif revert:
                         print("latest eval was worse, reverting model..")
 
                         self.model = copy_weights_over(model_prev, self.model)
                         self.model = self.model.to(device)
 
                         gc.collect(); torch.cuda.empty_cache()
-                
-                if do_save:
-                    self.model.save_pretrained(save_name + '_' + str((trained_steps // eval_steps)).format("02d"))
-                self.model.train()
-                last_eval = trained_steps
+                    
+                    if do_save:
+                        self.model.save_pretrained(save_name + '_' + str(batches_trained).format("02d"))
+                    self.model.train()
             
             steps_so_far += 1
 
