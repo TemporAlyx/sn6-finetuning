@@ -103,8 +103,9 @@ def validate_improvement(old_model_name, new_model_name, samples=768, tokenizer_
     print("Final Win Rate: ", per_loss_win_avg)
     print("Final 0Eps Win Rate: ", per_loss_win_avg_0eps)
 
-
-def print_model_params(model, norm=False, cache_dir=None):
+# helper function to print out the model parameters, optionally normalizing them first
+# helpful for looking for extreme values and other weight sanity checks
+def print_model_params(model, norm=False):
     model = AutoModelForCausalLM.from_pretrained(model, **params)
     if norm:
         model = norm_model_weights(model)
@@ -112,8 +113,8 @@ def print_model_params(model, norm=False, cache_dir=None):
         print(name, param)
     del model; gc.collect(); torch.cuda.empty_cache()
 
-
-def check_matching_weights(model0, model1, cache_dir=None):
+# helper function to quickly check if two models are the same and/or how close they are norm-wise
+def check_matching_weights(model0, model1):
     model0 = AutoModelForCausalLM.from_pretrained(model0, **params)
     model1 = AutoModelForCausalLM.from_pretrained(model1, **params)
     mismatch_diffs = []

@@ -22,6 +22,14 @@ def get_tokenizer(tokenizer_name):
     return AutoTokenizer.from_pretrained(tokenizer_name)
 
 def norm_model_weights(model):
+    # the primary method it seems people have found for corrupting model weights has to do with using two adjacent weight matrices, and rescaling them.
+    # for example, if the up_proj weights are multiplied by some set of values, and the down_proj weights are divided by the same set of values, 
+    # the model will still function, but attempts to train on it will have a high likelihood of exploding gradients.
+    # for other pairs like q and k, or v and o, its slightly more complicated, as the weights aren't directly adjacent, but the same principle applies.
+    # for a sense of how these matrcies are usually put together in a model, here is a good refernce
+    # https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py
+    # for non-directly adjacent pairs, it can be much more difficult to perform a full solve (possibly impossible), depending on how the model is structured.
+
     # NOTE: does not work with all models, different sizes and configurations may cause issues, not all weight pairs have a full solve
     bias = False
     for name, param in model.named_parameters():
@@ -79,9 +87,9 @@ def norm_model_weights(model):
                     
     return model
 
-
+# simple linear interpolation of weights between two models
 def merge(model0, model1, ratio=0.5, embed_ratio=None, norm_ratio=None, fc_ratio=None): # higher ratio means more of model0
-    if embed_ratio is None: embed_ratio = ratio
+    if embed_ratio is None: embed_ratio = ratio # not sure if using different ratios for different parts of the model actually makes any sense
     if norm_ratio is None: norm_ratio = ratio
     if fc_ratio is None: fc_ratio = ratio
 
@@ -109,6 +117,7 @@ def merge(model0, model1, ratio=0.5, embed_ratio=None, norm_ratio=None, fc_ratio
 
     return model1
 
+# helper function to copy weights over from one model to another, which doesn't (normally) break the optimizer state.
 def copy_weights_over(model0, model1):
     """Copies the weights from model0 to model1, returns model1 with the copied weights"""
     params0 = {}
@@ -120,6 +129,7 @@ def copy_weights_over(model0, model1):
             param.data = params0[name].data
     return model1
 
+# loads a config for general model loading parameters, and if it doesn't exist, creates a new one with default values
 def load_local_config(config_path='model_loading_config.json', cache_dir='Models'):
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
@@ -145,6 +155,32 @@ def save_local_config(config, config_name='model_loading_config.json'):
     with open(os.path.join(cache_dir, config_name), 'w') as f:
         json.dump(config, f)
 
+
+# below are some functions for separating calculating model hash from downloading the model which may be useful for some use cases
+# specifically, if models are being trained in the cloud, but a local computer is used to connect to the subnet, we can calculate the commit.oid and hash
+# in the cloud to avoid downloading the model to the local computer, which may be slow or have limited storage/compute.
+
+# MIT License
+
+# Copyright (c) 2023 Opentensor
+
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 # https://github.com/NousResearch/finetuning-subnet/blob/master/model/storage/disk/utils.py
 def get_hf_download_path(local_path: str, account_name, model_name, commit) -> str:
